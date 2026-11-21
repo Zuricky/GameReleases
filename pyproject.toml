@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gamereleases"
+dynamic = ["version"]
+description = "Discord bot that tracks upcoming video game releases from IGDB."
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+    "discord.py>=2.7.1",
+    "httpx>=0.28.0",
+    "pydantic-settings>=2.7.0",
+    # zoneinfo has no system time zone database on Windows.
+    "tzdata>=2024.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.8.0",
+    "pyright>=1.1.390",
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.25.0",
+]
+
+[project.scripts]
+gamereleases = "gamereleases.__main__:main"
+
+[tool.hatch.version]
+path = "src/gamereleases/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gamereleases"]
+
+[tool.ruff]
+line-length = 88
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["gamereleases"]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
+strict = ["src"]
+executionEnvironments = [
+    { root = "src" },
+    { root = "tests", extraPaths = ["src"] },
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = ["--strict-markers"]

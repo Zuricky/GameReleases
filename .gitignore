@@ -1,0 +1,22 @@
+# Environments and secrets
+.venv/
+.env
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+
+# Local data
+data/
+*.db
+*.sqlite3
+.vscode/

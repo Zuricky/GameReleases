@@ -1,0 +1,10 @@
+services:
+  bot:
+    build: .
+    image: gamereleases:latest
+    container_name: gamereleases
+    restart: unless-stopped
+    env_file: .env
+    mem_limit: 160m
+    volumes:
+      - ./data:/app/data
