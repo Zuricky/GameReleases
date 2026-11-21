@@ -307,6 +307,18 @@ class Repository:
 
         return await self._db.run(work)
 
+    async def get_pending_reminder_game_ids(self) -> list[int]:
+        """Return the distinct IDs of games that still have undelivered reminders."""
+
+        def work(conn: sqlite3.Connection) -> list[int]:
+            rows = conn.execute(
+                "SELECT DISTINCT game_id FROM game_reminders "
+                "WHERE sent = 0 ORDER BY game_id"
+            ).fetchall()
+            return [int(row["game_id"]) for row in rows]
+
+        return await self._db.run(work)
+
     async def get_due_reminders(
         self, released_game_ids: Collection[int]
     ) -> list[Reminder]:

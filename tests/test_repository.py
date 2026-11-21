@@ -442,3 +442,17 @@ async def test_count_stats_counts_every_table(repo: Repository) -> None:
     assert await repo.count_stats() == StorageStats(
         guilds=2, panel_messages=2, notified_games=1, pending_reminders=1
     )
+
+
+async def test_pending_reminder_game_ids_are_distinct_and_unsent(
+    repo: Repository,
+) -> None:
+    assert await repo.get_pending_reminder_game_ids() == []
+
+    await repo.toggle_reminder(1, 70, GUILD, 5)
+    await repo.toggle_reminder(2, 70, GUILD, 5)
+    await repo.toggle_reminder(1, 60, GUILD, 5)
+    await repo.toggle_reminder(1, 80, GUILD, 5)
+    await repo.mark_reminder_sent(1, 80)
+
+    assert await repo.get_pending_reminder_game_ids() == [60, 70]

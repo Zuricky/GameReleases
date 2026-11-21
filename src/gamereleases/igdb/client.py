@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable, Hashable
+from collections.abc import Awaitable, Callable, Hashable, Sequence
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
+from itertools import batched
 
 import httpx
 
@@ -30,6 +31,10 @@ BACKOFF_BASE_SECONDS = 0.5
 MAX_BACKOFF_SECONDS = 30.0
 REQUEST_TIMEOUT_SECONDS = 15.0
 CACHE_MAX_ENTRIES = 256
+# Individual games are cached too, so reminders for many games fit at once.
+GAME_CACHE_MAX_ENTRIES = 2048
+# IGDB returns at most 500 records per request.
+GAMES_BY_ID_CHUNK_SIZE = 500
 
 DEFAULT_UPCOMING_LIMIT = 200
 DEFAULT_SEARCH_LIMIT = 10
@@ -159,6 +164,15 @@ def build_search_query(text: str, *, limit: int) -> str:
     )
 
 
+def build_games_by_ids_query(game_ids: Sequence[int]) -> str:
+    """Build a query that fetches exactly the given games.
+
+    IGDB applies a default limit of 10 records, so the limit is set explicitly.
+    """
+    ids = ",".join(str(game_id) for game_id in game_ids)
+    return f"fields {GAME_FIELDS}; where id = ({ids}); limit {len(game_ids)};"
+
+
 class IgdbClient:
     """Fetches games from IGDB, within its rate limit and with caching.
 
@@ -191,6 +205,9 @@ class IgdbClient:
         self._search_cache: TtlCache[Hashable, tuple[Game, ...]] = TtlCache(
             SEARCH_TTL_SECONDS, clock=clock
         )
+        self._game_cache: TtlCache[int, Game] = TtlCache(
+            SEARCH_TTL_SECONDS, max_entries=GAME_CACHE_MAX_ENTRIES, clock=clock
+        )
 
     async def upcoming_games(
         self,
@@ -211,6 +228,7 @@ class IgdbClient:
         query = build_upcoming_query(start, days, include_dlc=include_dlc, limit=limit)
         games = map_games(await self._post("games", query))
         self._upcoming_cache.set(key, tuple(games))
+        self._remember(games)
         return games
 
     async def search_games(
@@ -233,12 +251,47 @@ class IgdbClient:
             await self._post("games", build_search_query(normalized, limit=limit))
         )
         self._search_cache.set(key, tuple(games))
+        self._remember(games)
         return games
+
+    async def get_games_by_ids(
+        self,
+        game_ids: Sequence[int],
+        *,
+        bypass_cache: bool = False,
+    ) -> list[Game]:
+        """Fetch specific games, preserving the order of ``game_ids``.
+
+        Duplicates are collapsed and unknown IDs are omitted. Games already in
+        the cache are not requested again; the rest are fetched in as few
+        requests as IGDB allows.
+        """
+        unique = list(dict.fromkeys(game_ids))
+        found: dict[int, Game] = {}
+        missing: list[int] = []
+        for game_id in unique:
+            cached = None if bypass_cache else self._game_cache.get(game_id)
+            if cached is None:
+                missing.append(game_id)
+            else:
+                found[game_id] = cached
+        for chunk in batched(missing, GAMES_BY_ID_CHUNK_SIZE):
+            games = map_games(
+                await self._post("games", build_games_by_ids_query(chunk))
+            )
+            self._remember(games)
+            found.update((game.id, game) for game in games)
+        return [found[game_id] for game_id in unique if game_id in found]
+
+    def _remember(self, games: Sequence[Game]) -> None:
+        for game in games:
+            self._game_cache.set(game.id, game)
 
     def clear_cache(self) -> None:
         """Drop every cached response."""
         self._upcoming_cache.clear()
         self._search_cache.clear()
+        self._game_cache.clear()
 
     def _backoff_delay(self, attempt: int, response: httpx.Response | None) -> float:
         if response is not None:

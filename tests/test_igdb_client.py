@@ -613,3 +613,70 @@ async def test_api_requests_never_exceed_four_per_second(stack: Stack) -> None:
 
     # Nine requests need at least eight 250 ms gaps.
     assert sum(stack.sleep.delays) == pytest.approx(2.0)
+
+
+# --- Lookup by ID ------------------------------------------------------------
+
+
+async def test_games_by_id_are_fetched_in_one_query(stack: Stack) -> None:
+    stack.server.api_responses = [ok(game_json(2, "Two"), game_json(1, "One"))]
+
+    games = await stack.client.get_games_by_ids([1, 2, 1])
+
+    assert [game.id for game in games] == [1, 2]
+    [request] = stack.server.api_requests
+    query = request.content.decode()
+    assert "where id = (1,2);" in query
+    assert "limit 2;" in query
+
+
+async def test_games_by_id_use_the_cache(stack: Stack) -> None:
+    stack.server.api_responses = [ok(game_json(1, "One")), ok(game_json(2, "Two"))]
+
+    await stack.client.get_games_by_ids([1])
+    games = await stack.client.get_games_by_ids([1, 2])
+
+    assert [game.name for game in games] == ["One", "Two"]
+    assert len(stack.server.api_requests) == 2
+    assert "where id = (2);" in stack.server.api_requests[1].content.decode()
+
+    await stack.client.get_games_by_ids([1, 2])
+    assert len(stack.server.api_requests) == 2
+
+
+async def test_games_by_id_bypass_cache(stack: Stack) -> None:
+    stack.server.api_responses = [ok(game_json(1, "One")), ok(game_json(1, "One v2"))]
+
+    await stack.client.get_games_by_ids([1])
+    games = await stack.client.get_games_by_ids([1], bypass_cache=True)
+
+    assert games[0].name == "One v2"
+
+
+async def test_games_by_id_omit_unknown_ids_and_skip_empty_requests(
+    stack: Stack,
+) -> None:
+    assert await stack.client.get_games_by_ids([]) == []
+    assert stack.server.api_requests == []
+
+    stack.server.api_responses = [ok(game_json(1, "One"))]
+    games = await stack.client.get_games_by_ids([404, 1])
+    assert [game.id for game in games] == [1]
+
+
+async def test_games_by_id_are_chunked(stack: Stack) -> None:
+    ids = list(range(1, 502))
+
+    await stack.client.get_games_by_ids(ids)
+
+    assert len(stack.server.api_requests) == 2
+
+
+async def test_upcoming_results_warm_the_game_cache(stack: Stack) -> None:
+    stack.server.api_responses = [ok(game_json(5, "Five"))]
+    await stack.client.upcoming_games(start=START, days=30)
+
+    games = await stack.client.get_games_by_ids([5])
+
+    assert [game.name for game in games] == ["Five"]
+    assert len(stack.server.api_requests) == 1
