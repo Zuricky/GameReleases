@@ -167,6 +167,7 @@ class AdminCog(commands.Cog):
         numero_pannelli="Quante schede di gioco pubblicare (da 1 a 10)",
         canale_avvisi="Canale per gli avvisi di uscita",
         ruolo_avvisi="Ruolo da menzionare negli avvisi di uscita",
+        azzera_avvisi="Rimuovi canale e ruolo degli avvisi (poi applica gli altri)",
         fuso_orario="Fuso orario IANA, ad esempio Europe/Rome",
     )
     @app_commands.choices(piattaforme=PLATFORM_CHOICES)
@@ -180,6 +181,7 @@ class AdminCog(commands.Cog):
         | None = None,
         canale_avvisi: discord.TextChannel | None = None,
         ruolo_avvisi: discord.Role | None = None,
+        azzera_avvisi: bool = False,
         fuso_orario: str | None = None,
     ) -> None:
         if not await require_manage_guild(interaction):
@@ -231,6 +233,10 @@ class AdminCog(commands.Cog):
         if timezone is not None and timezone != before.timezone:
             await repository.update_timezone(guild_id, timezone)
             changed = True
+        # Clearing comes first so a channel or role passed alongside replaces it.
+        if azzera_avvisi:
+            await repository.update_alert_channel(guild_id, None)
+            await repository.update_alert_role(guild_id, None)
         if canale_avvisi is not None:
             await repository.update_alert_channel(guild_id, canale_avvisi.id)
         if ruolo_avvisi is not None:
@@ -238,7 +244,7 @@ class AdminCog(commands.Cog):
 
         after = await repository.get_guild(guild_id) or before
         lines = [describe_config(after)]
-        passed = any(
+        passed = azzera_avvisi or any(
             value is not None
             for value in (
                 piattaforme,

@@ -571,7 +571,7 @@ async def test_autocomplete_needs_two_characters(
     assert igdb.search_calls == []
 
 
-async def test_autocomplete_returns_ids_as_values(
+async def test_autocomplete_returns_prefixed_ids_as_values(
     cog: ReleasesCog, igdb: FakeIgdb
 ) -> None:
     igdb.search_results = [
@@ -582,8 +582,8 @@ async def test_autocomplete_returns_ids_as_values(
     choices = await cast(Any, cog).game_autocomplete(make_interaction(), " hollow ")
 
     assert [(c.name, c.value) for c in choices] == [
-        ("Hollow Knight", "11"),
-        ("Hollow Night", "22"),
+        ("Hollow Knight", "id:11"),
+        ("Hollow Night", "id:22"),
     ]
     assert igdb.search_calls == [("hollow", AUTOCOMPLETE_MAX_CHOICES)]
 
@@ -645,7 +645,7 @@ async def test_game_by_selected_id(cog: ReleasesCog, igdb: FakeIgdb) -> None:
     igdb.by_id[42] = rich_game()
     interaction = make_interaction()
 
-    await invoke(cog.game, cog, interaction, "42")
+    await invoke(cog.game, cog, interaction, "id:42")
 
     assert igdb.id_calls == [[42]]
     assert igdb.search_calls == []
@@ -695,17 +695,44 @@ async def test_game_by_typed_text_falls_back_to_the_first_result(
     assert sent(interaction)["embed"].title == "Zelda: Echoes"
 
 
-async def test_game_with_an_unknown_numeric_id_is_searched_by_name(
+async def test_game_with_a_numeric_title_is_searched_by_name(
     cog: ReleasesCog, igdb: FakeIgdb
 ) -> None:
+    igdb.by_id[1942] = make_game(1942, "Some Other Game")
     igdb.search_results = [make_game(5, "1942")]
     interaction = make_interaction()
 
     await invoke(cog.game, cog, interaction, "1942")
 
-    assert igdb.id_calls == [[1942]]
+    assert igdb.id_calls == []
     assert igdb.search_calls[0][0] == "1942"
     assert sent(interaction)["embed"].title == "1942"
+
+
+async def test_game_with_an_unknown_selected_id_is_not_found(
+    cog: ReleasesCog, igdb: FakeIgdb
+) -> None:
+    interaction = make_interaction()
+
+    await invoke(cog.game, cog, interaction, "id:999")
+
+    assert igdb.id_calls == [[999]]
+    assert igdb.search_calls == []
+    interaction.followup.send.assert_awaited_once()
+
+
+@pytest.mark.parametrize("text", ["id:", "id:abc", "id:12x", "ID:42", "id: 42"])
+async def test_game_with_a_malformed_id_prefix_is_searched_by_name(
+    cog: ReleasesCog, igdb: FakeIgdb, text: str
+) -> None:
+    igdb.by_id[42] = rich_game()
+    igdb.search_results = [make_game(8, "Something")]
+    interaction = make_interaction()
+
+    await invoke(cog.game, cog, interaction, text)
+
+    assert igdb.id_calls == []
+    assert igdb.search_calls[0][0] == text
 
 
 async def test_game_not_found(cog: ReleasesCog, igdb: FakeIgdb) -> None:
@@ -734,7 +761,7 @@ async def test_game_card_for_a_released_game(cog: ReleasesCog, igdb: FakeIgdb) -
     igdb.by_id[1] = make_game(1, "Old Game", days_ahead=-40)
     interaction = make_interaction()
 
-    await invoke(cog.game, cog, interaction, "1")
+    await invoke(cog.game, cog, interaction, "id:1")
 
     assert "Uscito" in field_values(sent(interaction)["embed"])["📅 Uscita"]
 

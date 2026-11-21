@@ -183,6 +183,7 @@ async def run_config(cog: AdminCog, interaction: MagicMock, **params: Any) -> No
         "numero_pannelli": None,
         "canale_avvisi": None,
         "ruolo_avvisi": None,
+        "azzera_avvisi": False,
         "fuso_orario": None,
     }
     await invoke(cog.config, cog, interaction, **{**defaults, **params})
@@ -400,6 +401,85 @@ async def test_alert_settings_do_not_trigger_a_refresh(
     config = await repo.get_guild(GUILD)
     assert config is not None
     assert (config.alert_channel_id, config.alert_role_id) == (ALERT_CHANNEL, ROLE)
+
+
+async def test_config_can_clear_the_alert_settings(
+    cog: AdminCog, bot: SimpleNamespace, repo: Repository
+) -> None:
+    await configured_guild(
+        repo,
+        panel_count=4,
+        alert_channel_id=ALERT_CHANNEL,
+        alert_role_id=ROLE,
+    )
+    interaction = make_interaction()
+
+    await run_config(cog, interaction, azzera_avvisi=True)
+
+    config = await repo.get_guild(GUILD)
+    assert config is not None
+    assert (config.alert_channel_id, config.alert_role_id) == (None, None)
+    assert config.panel_count == 4
+    text = followup_text(interaction)
+    assert text.startswith("✅ Impostazioni aggiornate.")
+    assert "Canale avvisi: come i pannelli" in text
+    assert "Ruolo avvisi: nessuno" in text
+    bot.sync_guild.assert_not_awaited()
+
+
+async def test_clearing_alerts_applies_the_other_parameters_afterwards(
+    cog: AdminCog, bot: SimpleNamespace, repo: Repository
+) -> None:
+    await configured_guild(
+        repo,
+        alert_channel_id=ALERT_CHANNEL,
+        alert_role_id=ROLE,
+    )
+
+    await run_config(
+        cog,
+        make_interaction(),
+        azzera_avvisi=True,
+        ruolo_avvisi=make_role(777),
+        numero_pannelli=8,
+    )
+
+    config = await repo.get_guild(GUILD)
+    assert config is not None
+    assert config.alert_channel_id is None
+    assert config.alert_role_id == 777
+    assert config.panel_count == 8
+    bot.sync_guild.assert_awaited_once_with(GUILD)
+
+
+async def test_clearing_alerts_still_validates_a_passed_alert_channel(
+    cog: AdminCog, bot: SimpleNamespace, repo: Repository
+) -> None:
+    config = await configured_guild(
+        repo, alert_channel_id=ALERT_CHANNEL, alert_role_id=ROLE
+    )
+    interaction = make_interaction()
+
+    await run_config(
+        cog,
+        interaction,
+        azzera_avvisi=True,
+        canale_avvisi=make_channel(ALERT_CHANNEL, without("send_messages")),
+    )
+
+    assert "Inviare messaggi" in rejection_text(interaction)
+    # Nothing is cleared when validation fails.
+    assert await repo.get_guild(GUILD) == config
+
+
+async def test_clearing_alerts_on_a_new_guild_creates_defaults(
+    cog: AdminCog, repo: Repository
+) -> None:
+    await run_config(cog, make_interaction(), azzera_avvisi=True)
+
+    config = await repo.get_guild(GUILD)
+    assert config is not None
+    assert (config.alert_channel_id, config.alert_role_id) == (None, None)
 
 
 async def test_unchanged_display_settings_do_not_trigger_a_refresh(

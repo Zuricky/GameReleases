@@ -51,6 +51,8 @@ CHOICE_NAME_MAX_LENGTH = 100
 AUTOCOMPLETE_TIMEOUT_SECONDS = 2.5
 
 SEARCH_RESULT_LIMIT = 10
+# Marks an autocomplete selection; anything else is searched by title.
+GAME_ID_PREFIX = "id:"
 QUERY_ECHO_MAX_LENGTH = 100
 
 IGDB_UNAVAILABLE = "⚠️ Non riesco a contattare IGDB in questo momento. Riprova tra poco."
@@ -205,7 +207,7 @@ class ReleasesCog(commands.Cog):
     async def game_autocomplete(
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
-        """Suggest games by name; the chosen value is the IGDB game ID."""
+        """Suggest games by name; the chosen value is ``id:<IGDB game ID>``."""
         query = current.strip()
         if len(query) < AUTOCOMPLETE_MIN_CHARS:
             return []
@@ -218,23 +220,38 @@ class ReleasesCog(commands.Cog):
             logger.info("Autocomplete lookup failed", exc_info=True)
             return []
         return [
-            app_commands.Choice(name=_choice_name(game.name), value=str(game.id))
+            app_commands.Choice(
+                name=_choice_name(game.name), value=f"{GAME_ID_PREFIX}{game.id}"
+            )
             for game in games[:AUTOCOMPLETE_MAX_CHOICES]
         ]
 
     async def _resolve_game(self, text: str) -> Game | None:
         """Find the game for an autocomplete selection or for typed text.
 
-        A selection arrives as the numeric IGDB ID. Anything else, including a
-        number that is not a known ID, is searched by name.
+        A selection arrives as ``id:<IGDB ID>`` and is looked up directly. Any
+        other text, including a bare number such as "1942", is searched by
+        title. A selection whose ID is unknown yields no game.
         """
         query = text.strip()
-        if query.isascii() and query.isdecimal():
-            found = await self.bot.igdb.get_games_by_ids([int(query)])
+        game_id = _parse_game_id(query)
+        if game_id is not None:
+            found = await self.bot.igdb.get_games_by_ids([game_id])
             if found:
                 return found[0]
+            return None
         results = await self.bot.igdb.search_games(query, limit=SEARCH_RESULT_LIMIT)
         return pick_best_match(results, query)
+
+
+def _parse_game_id(text: str) -> int | None:
+    """Return the IGDB ID of an ``id:<number>`` selection, else ``None``."""
+    if not text.startswith(GAME_ID_PREFIX):
+        return None
+    digits = text.removeprefix(GAME_ID_PREFIX)
+    if digits.isascii() and digits.isdecimal():
+        return int(digits)
+    return None
 
 
 async def setup(bot: GameReleasesBot) -> None:

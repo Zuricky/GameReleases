@@ -8,17 +8,19 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN groupadd --system --gid 10001 app \
-    && useradd --system --uid 10001 --gid app --no-create-home \
+# UID/GID 1000 match the default user on common cloud VM images, so a
+# bind-mounted ./data directory is writable without extra chown steps.
+RUN groupadd --system --gid 1000 app \
+    && useradd --system --uid 1000 --gid 1000 --no-create-home \
         --shell /usr/sbin/nologin app
 
 COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install . \
     && mkdir -p /app/data \
-    && chown app:app /app/data
+    && chown 1000:1000 /app/data
 
-USER app
+USER 1000:1000
 
 VOLUME ["/app/data"]
 
