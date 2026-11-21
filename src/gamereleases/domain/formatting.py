@@ -11,7 +11,7 @@ import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, is_dataclass
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from enum import Enum
 from itertools import groupby
 from typing import Any, cast
@@ -60,6 +60,23 @@ def format_countdown(release_date: date, today: date) -> str:
     if delta <= COUNTDOWN_MAX_DAYS:
         return f"Tra {delta} giorni"
     return release_date.strftime("%d/%m/%Y")
+
+
+def format_duration(duration: timedelta) -> str:
+    """Describe an elapsed time in Italian, such as ``2g 3h 14m``.
+
+    Seconds are only shown while the duration is under a minute.
+    """
+    total = max(int(duration.total_seconds()), 0)
+    days, rest = divmod(total, 86_400)
+    hours, rest = divmod(rest, 3_600)
+    minutes, seconds = divmod(rest, 60)
+    parts = [
+        f"{value}{unit}"
+        for value, unit in ((days, "g"), (hours, "h"), (minutes, "m"))
+        if value
+    ]
+    return " ".join(parts) if parts else f"{seconds}s"
 
 
 def release_timestamp(day: date) -> int:

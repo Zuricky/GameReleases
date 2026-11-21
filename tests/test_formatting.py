@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -18,6 +18,7 @@ from gamereleases.domain.formatting import (
     discord_timestamp,
     escape_markdown,
     format_countdown,
+    format_duration,
     group_by_release_date,
     hash_payload,
     release_timestamp,
@@ -289,3 +290,19 @@ def test_hash_is_independent_of_set_iteration_order() -> None:
 def test_hash_rejects_unserializable_values() -> None:
     with pytest.raises(TypeError):
         hash_payload({"bad": object()})
+
+
+@pytest.mark.parametrize(
+    ("duration", "expected"),
+    [
+        (timedelta(seconds=5), "5s"),
+        (timedelta(seconds=59.9), "59s"),
+        (timedelta(minutes=1), "1m"),
+        (timedelta(hours=2, minutes=5), "2h 5m"),
+        (timedelta(days=3, hours=4, minutes=14, seconds=40), "3g 4h 14m"),
+        (timedelta(days=1), "1g"),
+        (timedelta(seconds=-30), "0s"),
+    ],
+)
+def test_format_duration(duration: timedelta, expected: str) -> None:
+    assert format_duration(duration) == expected

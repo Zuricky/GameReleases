@@ -404,3 +404,52 @@ async def test_concurrent_passes_for_a_guild_do_not_duplicate(
     assert len(messenger.messages) == 3
     assert sum(r.created for r in results) == 3
     assert await slots(repo) == [OVERVIEW_SLOT, 0, 1]
+
+
+async def test_clear_deletes_tracked_messages_and_forgets_them(
+    reconciler: PanelReconciler[EmbedData],
+    repo: Repository,
+    messenger: FakeMessenger,
+) -> None:
+    await reconciler.reconcile(GUILD, CHANNEL, embed("o"), cards("a", "b"), 5)
+
+    removed = await reconciler.clear(GUILD)
+
+    assert removed == 3
+    assert messenger.messages == {}
+    assert await slots(repo) == []
+
+
+async def test_clear_is_best_effort_for_messages_it_cannot_delete(
+    reconciler: PanelReconciler[EmbedData],
+    repo: Repository,
+    messenger: FakeMessenger,
+) -> None:
+    await reconciler.reconcile(GUILD, CHANNEL, embed("o"), cards("a", "b"), 5)
+    first, second, _ = sorted(message_id for _, message_id in messenger.messages)
+    messenger.forbidden_deletes.add(first)
+    del messenger.messages[(CHANNEL, second)]  # already deleted by hand
+
+    removed = await reconciler.clear(GUILD)
+
+    assert removed == 3
+    assert await slots(repo) == []
+
+
+async def test_panel_is_posted_again_in_order_after_clear(
+    reconciler: PanelReconciler[EmbedData],
+    messenger: FakeMessenger,
+) -> None:
+    await reconciler.reconcile(GUILD, CHANNEL, embed("o"), cards("a", "b"), 5)
+    await reconciler.clear(GUILD)
+
+    result = await reconciler.reconcile(GUILD, CHANNEL, embed("o"), cards("a", "b"), 5)
+
+    assert result == ReconcileResult(created=3)
+    assert messenger.titles_in(CHANNEL) == ["o", "a", "b"]
+
+
+async def test_clear_of_an_untracked_guild_removes_nothing(
+    reconciler: PanelReconciler[EmbedData],
+) -> None:
+    assert await reconciler.clear(GUILD) == 0

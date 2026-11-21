@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import discord
@@ -13,7 +14,7 @@ import httpx
 from discord.ext import commands, tasks
 
 from gamereleases.bot.reconciler import PanelReconciler
-from gamereleases.bot.sync import SyncCycle
+from gamereleases.bot.sync import SyncCycle, SyncReport
 from gamereleases.bot.views import (
     DiscordMessenger,
     PanelPayload,
@@ -157,11 +158,35 @@ class GameReleasesBot(commands.Bot):
         await asyncio.to_thread(marker.write_text, digest, "utf-8")
         logger.info("Synced %d slash commands", len(synced))
 
-    async def run_sync_cycle(self, bypass_cache: bool = False) -> None:
-        """Refresh panels, send release-day alerts and deliver due reminders."""
+    def _require_sync(self) -> SyncCycle:
         if self._sync is None:
             raise RuntimeError("the bot has not finished starting up")
-        await self._sync.run(bypass_cache=bypass_cache)
+        return self._sync
+
+    async def run_sync_cycle(self, bypass_cache: bool = False) -> SyncReport:
+        """Refresh panels, send release-day alerts and deliver due reminders."""
+        return await self._require_sync().run(bypass_cache=bypass_cache)
+
+    async def sync_guild(self, guild_id: int, bypass_cache: bool = False) -> SyncReport:
+        """Refresh the panel and release-day alerts of a single guild."""
+        return await self._require_sync().sync_guild(
+            guild_id, bypass_cache=bypass_cache
+        )
+
+    @property
+    def uptime(self) -> timedelta:
+        """Time elapsed since the bot object was created."""
+        return discord.utils.utcnow() - self.started_at
+
+    @property
+    def last_sync(self) -> SyncReport | None:
+        """The outcome of the latest full sync, or ``None`` before the first."""
+        return None if self._sync is None else self._sync.last_report
+
+    @property
+    def next_sync_at(self) -> datetime | None:
+        """When the periodic sync runs next, if it is scheduled."""
+        return self.sync_loop.next_iteration
 
     @tasks.loop(hours=SYNC_INTERVAL_HOURS)
     async def sync_loop(self) -> None:

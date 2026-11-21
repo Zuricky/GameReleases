@@ -447,3 +447,83 @@ async def test_pending_games_are_looked_up_in_one_batch(harness: Harness) -> Non
 
     assert harness.games.lookup_calls == [[1, 2, 3]]
     assert len(harness.notifier.direct) == 6
+
+
+# -- reports and single-guild sync ---------------------------------------------
+
+
+async def test_run_reports_what_it_did_and_remembers_it(harness: Harness) -> None:
+    harness.games.catalog = [make_game(1, "Game", TODAY + timedelta(days=3))]
+    assert harness.cycle.last_report is None
+
+    report = await harness.cycle.run()
+
+    assert report.ok
+    assert report.guilds_synced == 1
+    assert report.guilds_failed == 0
+    assert report.messages_changed == 2  # overview and one card
+    assert report.finished_at == NOW
+    assert harness.cycle.last_report == report
+
+
+async def test_unchanged_panel_reports_no_changes(harness: Harness) -> None:
+    harness.games.catalog = [make_game(1, "Game", TODAY + timedelta(days=3))]
+    await harness.run()
+
+    report = await harness.cycle.run()
+
+    assert report.guilds_synced == 1
+    assert report.messages_changed == 0
+
+
+async def test_igdb_failure_is_reported(harness: Harness) -> None:
+    harness.games.upcoming_error = IgdbError("down")
+
+    report = await harness.cycle.run()
+
+    assert not report.ok
+    assert report.catalog_failed
+    assert report.guilds_synced == 0
+    assert report.guilds_failed == 1
+
+
+async def test_panel_failure_is_reported_as_a_failed_guild(harness: Harness) -> None:
+    async def failing_send(channel_id: int, payload: PanelPayload) -> int:
+        raise RuntimeError("boom")
+
+    harness.messenger.send = failing_send  # pyright: ignore[reportAttributeAccessIssue]
+    harness.games.catalog = [make_game(1, "Game", TODAY + timedelta(days=3))]
+
+    report = await harness.cycle.run()
+
+    assert not report.ok
+    assert (report.guilds_synced, report.guilds_failed) == (0, 1)
+    assert not report.catalog_failed
+
+
+async def test_sync_guild_touches_only_that_guild(harness: Harness) -> None:
+    await harness.repo.upsert_guild(
+        GuildConfig(guild_id=GUILD + 1, panel_channel_id=PANEL_CHANNEL + 1)
+    )
+    harness.cycle._guild_ids = lambda: [GUILD, GUILD + 1]  # pyright: ignore[reportPrivateUsage]
+    harness.games.catalog = [make_game(1, "Game", TODAY + timedelta(days=3))]
+
+    report = await harness.cycle.sync_guild(GUILD + 1)
+
+    assert report.guilds_synced == 1
+    assert {channel for channel, _ in harness.messenger.sent} == {PANEL_CHANNEL + 1}
+    assert await harness.repo.get_panel_messages(GUILD) == []
+    # A single-guild pass is not the periodic run.
+    assert harness.cycle.last_report is None
+
+
+async def test_sync_guild_ignores_a_guild_without_panel_channel(
+    harness: Harness,
+) -> None:
+    await harness.repo.upsert_guild(GuildConfig(guild_id=GUILD + 1))
+    await harness.cycle.sync_guild(GUILD + 1)
+    report = await harness.cycle.sync_guild(GUILD + 2)  # unknown guild
+
+    assert harness.messenger.sent == []
+    assert (report.guilds_synced, report.guilds_failed) == (0, 0)
+    assert report.ok

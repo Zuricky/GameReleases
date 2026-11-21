@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
 import discord
 
-from gamereleases.bot.reconciler import PanelReconciler
+from gamereleases.bot.reconciler import PanelReconciler, ReconcileResult
 from gamereleases.bot.views import (
     PanelPayload,
     build_game_card_payload,
@@ -79,6 +80,23 @@ class Notifier(Protocol):
     ) -> None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class SyncReport:
+    """The outcome of a sync pass, by number of guilds and panel messages."""
+
+    finished_at: datetime
+    guilds_synced: int = 0
+    guilds_failed: int = 0
+    # The upcoming catalog could not be fetched for at least one DLC setting.
+    catalog_failed: bool = False
+    # Panel messages posted, edited, recreated or deleted.
+    messages_changed: int = 0
+
+    @property
+    def ok(self) -> bool:
+        return not self.catalog_failed and self.guilds_failed == 0
+
+
 class SyncCycle:
     """One pass over every configured guild, then over pending reminders.
 
@@ -105,25 +123,68 @@ class SyncCycle:
         self._default_timezone = default_timezone
         self._clock = clock
         self._lock = asyncio.Lock()
+        self.last_report: SyncReport | None = None
 
-    async def run(self, *, bypass_cache: bool = False) -> None:
+    async def run(self, *, bypass_cache: bool = False) -> SyncReport:
         """Run a full pass; concurrent calls queue up instead of overlapping."""
         async with self._lock:
             now = self._clock()
             configs = await self._load_configs()
-            catalogs = await self._fetch_catalogs(configs, now, bypass_cache)
-            for config in configs:
-                catalog = catalogs.get(config.include_dlc)
-                if catalog is None:
-                    continue
-                try:
-                    await self._sync_guild(config, catalog, now)
-                except Exception:
-                    logger.exception("Sync failed for guild %d", config.guild_id)
+            report = await self._sync_configs(configs, now, bypass_cache)
             try:
                 await self._deliver_reminders(now, bypass_cache)
             except Exception:
                 logger.exception("Reminder delivery failed")
+            self.last_report = report
+            return report
+
+    async def sync_guild(
+        self, guild_id: int, *, bypass_cache: bool = False
+    ) -> SyncReport:
+        """Refresh the panel and alerts of one guild.
+
+        Does nothing for a guild without a panel channel. Reminders are left to
+        the periodic pass, and the result is not recorded as the last full run.
+        """
+        async with self._lock:
+            now = self._clock()
+            config = await self._repository.get_guild(guild_id)
+            configs = (
+                [] if config is None or config.panel_channel_id is None else [config]
+            )
+            return await self._sync_configs(configs, now, bypass_cache)
+
+    async def _sync_configs(
+        self, configs: Sequence[GuildConfig], now: datetime, bypass_cache: bool
+    ) -> SyncReport:
+        catalogs = await self._fetch_catalogs(configs, now, bypass_cache)
+        needed = {config.include_dlc for config in configs}
+        synced = failed = changed = 0
+        for config in configs:
+            catalog = catalogs.get(config.include_dlc)
+            if catalog is None:
+                failed += 1
+                continue
+            try:
+                result = await self._sync_guild(config, catalog, now)
+            except Exception:
+                logger.exception("Sync failed for guild %d", config.guild_id)
+                failed += 1
+                continue
+            if result is None:
+                failed += 1
+                continue
+            synced += 1
+            changed += (
+                result.created + result.edited + result.recreated + result.deleted
+            )
+        return SyncReport(
+            finished_at=self._clock(),
+            guilds_synced=synced,
+            guilds_failed=failed,
+            catalog_failed=not needed <= catalogs.keys(),
+            messages_changed=changed,
+        )
 
     async def _load_configs(self) -> list[GuildConfig]:
         configs: list[GuildConfig] = []
@@ -157,10 +218,11 @@ class SyncCycle:
 
     async def _sync_guild(
         self, config: GuildConfig, catalog: Sequence[Game], now: datetime
-    ) -> None:
+    ) -> ReconcileResult | None:
+        """Sync one guild; return ``None`` if its panel could not be reconciled."""
         channel_id = config.panel_channel_id
         if channel_id is None:
-            return
+            return None
         today = today_in(now, resolve_timezone(config.timezone))
 
         def rank(limit: int) -> list[RankedGame]:
@@ -188,10 +250,12 @@ class SyncCycle:
             )
         except Exception:
             logger.exception("Panel sync failed for guild %d", config.guild_id)
+            result = None
         else:
             logger.info("Synced panel for guild %d: %s", config.guild_id, result)
 
         await self._send_release_alerts(config, channel_id, top, today)
+        return result
 
     async def _send_release_alerts(
         self,

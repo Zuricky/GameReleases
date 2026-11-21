@@ -91,6 +91,28 @@ class PanelReconciler[P]:
                 guild_id, channel_id, overview, cards[: max(panel_count, 0)]
             )
 
+    async def clear(self, guild_id: int) -> int:
+        """Forget the guild's panel, deleting its messages on a best-effort basis.
+
+        The next :meth:`reconcile` then posts every message again, in order.
+        Returns how many tracked messages were dropped.
+        """
+        lock = self._locks.setdefault(guild_id, asyncio.Lock())
+        async with lock:
+            tracked = await self._repository.get_panel_messages(guild_id)
+            for message in tracked:
+                try:
+                    await self._delete_quietly(message)
+                except Exception:
+                    logger.warning(
+                        "Could not delete message %d in channel %d",
+                        message.message_id,
+                        message.channel_id,
+                        exc_info=True,
+                    )
+            await self._repository.clear_panel_messages(guild_id)
+            return len(tracked)
+
     async def _reconcile(
         self,
         guild_id: int,

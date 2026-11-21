@@ -32,6 +32,7 @@ from gamereleases.domain.models import (
     StoreKind,
     StoreLink,
 )
+from gamereleases.domain.ranking import resolve_release_date
 from gamereleases.igdb.auth import TwitchAuthError
 from gamereleases.igdb.client import IgdbClient, IgdbError
 from gamereleases.storage.repository import Repository
@@ -44,6 +45,17 @@ ALERT_COLOR = 0x57F287
 MAX_STORE_BUTTONS = 3
 SUMMARY_MAX_LENGTH = 300
 MAX_FIELD_ITEMS = 8
+
+# Idle time after which the paging controls of a list are disabled.
+PAGINATION_TIMEOUT_SECONDS = 180.0
+# Idle time after which a one-off card stops tracking its buttons in memory.
+CARD_TIMEOUT_SECONDS = 600.0
+
+NAV_ROW = 0
+STORE_ROW = 1
+ACTION_ROW = 2
+
+UNKNOWN_RELEASE_TEXT = "Data da definire"
 
 REMIND_PATTERN = re.compile(r"remind:(?P<game_id>\d+)")
 TRAILER_PATTERN = re.compile(r"trailer:(?P<game_id>\d+)")
@@ -157,17 +169,7 @@ def build_overview_payload(
     return _embed_payload(build_overview(ranked, synced_at=synced_at, preset=preset))
 
 
-def build_game_card_payload(ranked: RankedGame, *, today: date) -> PanelPayload:
-    """Build the rich card of one upcoming game.
-
-    ``today`` is the current date in the guild's time zone, so the countdown
-    (and with it the payload hash) only changes when the day does.
-    """
-    game = ranked.game
-    release = (
-        f"{discord_timestamp(release_timestamp(ranked.release_date), 'D')}\n"
-        f"{format_countdown(ranked.release_date, today)}"
-    )
+def _card_payload(game: Game, release: str) -> PanelPayload:
     fields = [FieldData("📅 Uscita", release)]
     platforms = _platform_names(game)
     if platforms:
@@ -186,6 +188,37 @@ def build_game_card_payload(ranked: RankedGame, *, today: date) -> PanelPayload:
         store_buttons=_store_buttons(game.stores),
         game_id=game.id,
         has_trailer=game.trailer_url is not None,
+    )
+
+
+def _release_text(release_date: date, today: date) -> str:
+    return (
+        f"{discord_timestamp(release_timestamp(release_date), 'D')}\n"
+        f"{format_countdown(release_date, today)}"
+    )
+
+
+def build_game_card_payload(ranked: RankedGame, *, today: date) -> PanelPayload:
+    """Build the rich card of one upcoming game.
+
+    ``today`` is the current date in the guild's time zone, so the countdown
+    (and with it the payload hash) only changes when the day does.
+    """
+    return _card_payload(ranked.game, _release_text(ranked.release_date, today))
+
+
+def build_game_detail_payload(game: Game, *, today: date) -> PanelPayload:
+    """Build the card of any game, including released ones and undated ones.
+
+    A game without an exact release day shows IGDB's own wording (for example a
+    month or a quarter) instead of a countdown.
+    """
+    release_date = resolve_release_date(game)
+    if release_date is not None:
+        return _card_payload(game, _release_text(release_date, today))
+    human = next((entry.human for entry in game.release_dates if entry.human), None)
+    return _card_payload(
+        game, escape_markdown(human) if human else UNKNOWN_RELEASE_TEXT
     )
 
 
@@ -335,18 +368,131 @@ class TrailerButton(
             await _reply(interaction, f"🎬 Trailer di **{title}**:\n{game.trailer_url}")
 
 
-class GameCardView(discord.ui.View):
-    """Store links, then the reminder and trailer buttons, in one row."""
+def _add_game_buttons(
+    view: discord.ui.View, payload: PanelPayload, *, row: int | None
+) -> None:
+    """Add the reminder and trailer buttons of a game card to ``view``."""
+    if payload.game_id is None:
+        return
+    remind = RemindButton(payload.game_id)
+    remind.row = row
+    view.add_item(remind)
+    if payload.has_trailer:
+        trailer = TrailerButton(payload.game_id)
+        trailer.row = row
+        view.add_item(trailer)
 
-    def __init__(self, payload: PanelPayload) -> None:
-        # No timeout: the dynamic buttons must keep working across restarts.
-        super().__init__(timeout=None)
+
+class GameCardView(discord.ui.View):
+    """Store links, then the reminder and trailer buttons, in one row.
+
+    Panel messages keep the default ``timeout=None``, which keeps the view
+    alive for the process lifetime. One-off replies should pass a timeout so
+    the view is dropped; the buttons keep working either way, as they are
+    resolved from their ``custom_id``.
+    """
+
+    def __init__(self, payload: PanelPayload, *, timeout: float | None = None) -> None:
+        super().__init__(timeout=timeout)
         for store in payload.store_buttons[:MAX_STORE_BUTTONS]:
             self.add_item(discord.ui.Button(label=store.label, url=store.url))
-        if payload.game_id is not None:
-            self.add_item(RemindButton(payload.game_id))
-            if payload.has_trailer:
-                self.add_item(TrailerButton(payload.game_id))
+        _add_game_buttons(self, payload, row=None)
+
+
+class _StepButton(discord.ui.Button["PaginatedReleasesView"]):
+    def __init__(self, label: str, step: int) -> None:
+        super().__init__(label=label, style=discord.ButtonStyle.secondary, row=NAV_ROW)
+        self._step = step
+
+    async def callback(self, interaction: discord.Interaction[Any]) -> None:
+        view = self.view
+        if view is not None:
+            await view.turn(interaction, self._step)
+
+
+class PaginatedReleasesView(discord.ui.View):
+    """Shows one game at a time, with paging, store links and card buttons.
+
+    Rows: paging controls, then store links, then the reminder and trailer
+    buttons of the current game. Paging wraps around at both ends. Only the
+    user who ran the command can page, as the message is shared. When the view
+    times out the paging controls are disabled, while the store links and the
+    reminder and trailer buttons stay usable.
+    """
+
+    def __init__(
+        self,
+        items: Sequence[RankedGame],
+        *,
+        today: date,
+        owner_id: int,
+        timeout: float = PAGINATION_TIMEOUT_SECONDS,
+    ) -> None:
+        if not items:
+            raise ValueError("a paginated view needs at least one game")
+        super().__init__(timeout=timeout)
+        self.items = tuple(items)
+        self.today = today
+        self.owner_id = owner_id
+        self.page = 0
+        # Set once the reply has been sent; used to disable the controls.
+        self.interaction: discord.Interaction[Any] | None = None
+        self._previous = _StepButton("◀️ Indietro", -1)
+        self._indicator: discord.ui.Button[Any] = discord.ui.Button(
+            label="", style=discord.ButtonStyle.secondary, disabled=True, row=NAV_ROW
+        )
+        self._next = _StepButton("Avanti ▶️", 1)
+        self._render()
+
+    @property
+    def payload(self) -> PanelPayload:
+        return build_game_card_payload(self.items[self.page], today=self.today)
+
+    def _render(self) -> None:
+        """Rebuild the buttons for the current page."""
+        payload = self.payload
+        multiple = len(self.items) > 1
+        self._previous.disabled = not multiple
+        self._next.disabled = not multiple
+        self._indicator.label = f"{self.page + 1} / {len(self.items)}"
+
+        self.clear_items()
+        self.add_item(self._previous)
+        self.add_item(self._indicator)
+        self.add_item(self._next)
+        for store in payload.store_buttons[:MAX_STORE_BUTTONS]:
+            self.add_item(
+                discord.ui.Button(label=store.label, url=store.url, row=STORE_ROW)
+            )
+        _add_game_buttons(self, payload, row=ACTION_ROW)
+
+    async def turn(self, interaction: discord.Interaction[Any], step: int) -> None:
+        """Move ``step`` pages, wrapping around, and show the new page."""
+        self.page = (self.page + step) % len(self.items)
+        self._render()
+        await interaction.response.edit_message(
+            embed=self.payload.to_embed(), view=self
+        )
+
+    async def interaction_check(self, interaction: discord.Interaction[Any]) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message(
+            "⚠️ Solo chi ha usato il comando può sfogliare l'elenco. "
+            "Usa /nextreleases per averne uno tuo.",
+            ephemeral=True,
+        )
+        return False
+
+    async def on_timeout(self) -> None:
+        self._previous.disabled = True
+        self._next.disabled = True
+        if self.interaction is None:
+            return
+        try:
+            await self.interaction.edit_original_response(view=self)
+        except discord.HTTPException:
+            logger.debug("Could not disable the paging controls", exc_info=True)
 
 
 class DiscordMessenger:
